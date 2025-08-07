@@ -4,11 +4,23 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 authors = [
-    { name = "noam teyssier", email = "22600644+noamteyssier@users.noreply.github.com" }
+    { name = "noam teyssier", email = "22600644+noamteyssier@users.noreply.github.com" },
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = ["anndata>=0.12.1"]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+
+[dependency-groups]
+dev = [
+    "marimo>=0.14.16",
+    "matplotlib>=3.10.5",
+    "polars>=1.32.1",
+    "seaborn>=0.13.2",
+]
