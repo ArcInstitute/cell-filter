@@ -1,6 +1,8 @@
+import sys
+
 import anndata as ad
 import numpy as np
-from scipy.sparse import csc_matrix, csr_matrix
+from scipy.sparse import csr_matrix
 from scipy.special import betaln
 
 from ._sgt import simple_good_turing
@@ -11,7 +13,7 @@ UMI_THRESHOLD = 10
 def _log_dm_lik(
     alpha: float,
     total: float,
-    counts: np.ndarray,
+    counts: csr_matrix,
     probs: np.ndarray,
 ):
     """Log of the Dirichlet-Multinomial Likelihood.
@@ -31,12 +33,9 @@ def _log_dm_lik(
     alpha_g = alpha * probs
 
     # Summation term
-    if isinstance(counts, csr_matrix) or isinstance(counts, csc_matrix):
-        summation = np.sum(
-            np.log(counts.data) + betaln(counts.data, alpha_g[: counts.data.size])  # type: ignore
-        )
-    else:
-        summation = np.sum(np.log(counts) + betaln(counts, alpha_g))
+    summation = np.sum(
+        np.log(counts.data) + betaln(counts.data, alpha_g[counts.indices])
+    )
 
     return constant - summation
 
@@ -67,6 +66,11 @@ def empty_drops(
     adata: ad.AnnData,
     threshold: float | int = UMI_THRESHOLD,
 ):
+    if not isinstance(adata.X, csr_matrix):
+        print("Converting data to csr_matrix...", file=sys.stderr)
+        adata.X = csr_matrix(adata.X)
+        print("Finished converting data to csr_matrix.", file=sys.stderr)
+
     if threshold <= 0:
         raise ValueError("threshold must be positive non-zero")
 
@@ -83,6 +87,7 @@ def empty_drops(
     alpha = np.random.uniform(0.1, 100)
     likelihoods = _eval_neg_log_likelihood(
         alpha,
-        csr_matrix(ambient_adata.X),  # type: ignore
+        ambient_adata.X,  # type: ignore
         probs,
     )
+    return likelihoods
