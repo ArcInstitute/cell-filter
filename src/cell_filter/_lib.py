@@ -71,23 +71,30 @@ def empty_drops(
         adata.X = csr_matrix(adata.X)
         print("Finished converting data to csr_matrix.", file=sys.stderr)
 
+    # Extract matrix from AnnData object
+    matrix = adata.X
+
     if threshold <= 0:
         raise ValueError("threshold must be positive non-zero")
 
-    cell_umi_counts = adata.X.sum(axis=1)  # type: ignore
+    # Determine cell UMI counts
+    cell_umi_counts = np.array(matrix.sum(axis=1)).flatten()
+
+    # Identify ambient cells
     ambient_mask = cell_umi_counts < threshold
 
-    ambient_adata = adata[ambient_mask]
-    ambient_gene_sum = np.array(
-        ambient_adata.X.sum(axis=0)  # type: ignore
-    ).flatten()
+    # Extract ambient matrix
+    amb_matrix = matrix[ambient_mask]
+    ambient_gene_sum = np.array(amb_matrix.sum(axis=0)).flatten()
 
+    # Convert probabilities
     probs = simple_good_turing(ambient_gene_sum)
 
     alpha = np.random.uniform(0.1, 100)
     likelihoods = _eval_neg_log_likelihood(
         alpha,
-        ambient_adata.X,  # type: ignore
+        amb_matrix,
         probs,
     )
+
     return likelihoods
