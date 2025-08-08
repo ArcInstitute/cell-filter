@@ -108,44 +108,13 @@ def _csr_multinomial(
     n: int,
     p_mat: np.ndarray,
     n_iter: int,
-    choices: np.ndarray,
-    sample_indices: np.ndarray,
+    encoding: np.ndarray,
 ):
-    """Perform an efficient sampling from a multinomial distribution.
-
-    This works well when `n << len(p)` as the expected sampled matrix is sparse.
-
-    This function uses vectorized operations to efficiently sample from a multinomial distribution.
-    It's optimized for speed and memory efficiency.
-
-    # Inputs:
-    n: int
-        The number of trials for each sample
-    p_mat: np.ndarray
-        A 2D array of probabilities of size (n_iter, len(p))
-    n_iter: int
-        The number of iterations to perform
-    choices: np.ndarray
-        The sampled categories for each sample (1D).
-        This array is arranged as follows:
-            [n=1   ] [n=2   ] [n=3   ] [...]
-            [n_iter] [n_iter] [n_iter] [...]
-
-    # Outputs:
-    csr_matrix
-        The sampled count matrix
-    """
     if n == 0:
         return csr_matrix((n_iter, p_mat.shape[1]), dtype=int)
 
-    # Encode coordinates
-    #
-    # This shifts all choice categories by the category size
-    # providing a unique category set for each sample
-    coords = sample_indices[: n_iter * n] * p_mat.shape[1] + choices[: n_iter * n]
-
     # Vectorized count over all samples
-    unique_coords, counts = np.unique(coords, return_counts=True)
+    unique_coords, counts = np.unique(encoding[: n_iter * n], return_counts=True)
 
     # Decode coordinates back to the original categories
     rows = unique_coords // p_mat.shape[1]
@@ -198,12 +167,21 @@ def _score_simulations(
     # Precompute the sample indices
     sample_indices = np.repeat(np.arange(n_iter), unique_totals.max())
 
+    # Encode the categorical choices
+    #
+    # All categories will be right-shifted by the total number of categories
+    # for each iteration (ensuring each iteration has a unique range of categories)
+    encoding = sample_indices * p_hat.shape[1] + choices
+
+    # Presort the encoding array
+    np.sort(encoding)
+
     # For each unique total sample all iterations at once and score
     scores = np.zeros((unique_totals.size, n_iter))
     for idx, total in tqdm(
         enumerate(unique_totals), desc="Scoring simulations", total=unique_totals.size
     ):
-        matrices = _csr_multinomial(total, p_hat, n_iter, choices, sample_indices)
+        matrices = _csr_multinomial(total, p_hat, n_iter, encoding)
         scores[idx] = _eval_log_likelihood(
             alpha, matrices, np.repeat(total, n_iter), probs
         )
