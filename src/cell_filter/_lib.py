@@ -2,6 +2,7 @@ import sys
 
 import anndata as ad
 import numpy as np
+from scipy.optimize import OptimizeResult, minimize_scalar
 from scipy.sparse import csr_matrix
 from scipy.special import betaln
 
@@ -49,6 +50,28 @@ def _eval_neg_log_likelihood(
     return -likelihoods.sum()
 
 
+def _estimate_alpha(matrix: csr_matrix, probs: np.ndarray):
+    """Estimate the alpha parameter by optimizing the maximum likelihood of the DM distribution.
+
+    # Inputs:
+    matrix: csr_matrix
+        The count matrix of shape (n_cells, n_genes)
+    probs: np.ndarray
+        The probability of each gene being expressed
+    """
+    bc_sum = np.array(matrix.sum(axis=1)).flatten()
+
+    # Optimize alpha
+    result = minimize_scalar(
+        lambda x: _eval_neg_log_likelihood(x, matrix, bc_sum, probs).sum(),
+        bounds=(1e-6, 1000),
+        method="bounded",
+    )
+    if not result.success or not isinstance(result, OptimizeResult):
+        raise ValueError("Optimization failed")
+    return result.x
+
+
 def empty_drops(
     adata: ad.AnnData,
     threshold: float | int = UMI_THRESHOLD,
@@ -73,17 +96,11 @@ def empty_drops(
     # Extract ambient matrix
     amb_matrix = matrix[ambient_mask]
     ambient_gene_sum = np.array(amb_matrix.sum(axis=0)).flatten()
-    ambient_bc_sum = np.array(amb_matrix.sum(axis=1)).flatten()
 
     # Convert probabilities
     probs = simple_good_turing(ambient_gene_sum)
 
-    alpha = np.random.uniform(0.1, 100)
-    likelihoods = _eval_neg_log_likelihood(
-        alpha,
-        amb_matrix,
-        ambient_bc_sum,
-        probs,
-    )
+    # Estimate alpha
+    alpha = _estimate_alpha(amb_matrix, probs)
 
-    return likelihoods
+    return alpha
