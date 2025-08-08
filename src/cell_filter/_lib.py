@@ -42,7 +42,8 @@ def _log_dm_lik(
 
 def _eval_neg_log_likelihood(
     alpha: float,
-    matrix: np.ndarray | csr_matrix,
+    matrix: csr_matrix,
+    total: np.ndarray,
     probs: np.ndarray,
 ):
     """Evaluate the negative log likelihood of the Dirichlet-Multinomial distribution.
@@ -50,12 +51,13 @@ def _eval_neg_log_likelihood(
     # Arguments
     alpha: float
         The scaling factor for the Dirichlet prior
-    matrix: np.ndarray | csr_matrix
-        The observed counts for each gene in barcode `b`
+    matrix: csr_matrix
+        The observed counts for each gene across all barcodes `b`
+    total: np.ndarray
+        The total number of transcripts across all barcodes `b`
     probs: np.ndarray
         The probability of each gene being expressed
     """
-    total = np.array(matrix.sum(axis=1)).flatten()
     likelihoods = np.zeros_like(total)
     for idx in np.arange(total.size):
         likelihoods[idx] = _log_dm_lik(alpha, total[idx], matrix[idx], probs)
@@ -86,6 +88,7 @@ def empty_drops(
     # Extract ambient matrix
     amb_matrix = matrix[ambient_mask]
     ambient_gene_sum = np.array(amb_matrix.sum(axis=0)).flatten()
+    ambient_bc_sum = np.array(amb_matrix.sum(axis=1)).flatten()
 
     # Convert probabilities
     probs = simple_good_turing(ambient_gene_sum)
@@ -94,6 +97,7 @@ def empty_drops(
     likelihoods = _eval_neg_log_likelihood(
         alpha,
         amb_matrix,
+        ambient_bc_sum,
         probs,
     )
 
