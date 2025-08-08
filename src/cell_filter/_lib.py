@@ -205,8 +205,6 @@ def empty_drops(
     threshold: float | int = UMI_THRESHOLD,
     n_iter: int = N_SIMULATIONS,
     seed: int = SEED,
-    n_processes: int | None = None,
-    chunk_size: int | None = None,
 ):
     logging.basicConfig(level=logging.INFO)
     """Empty drops detection with optional multiprocessing."""
