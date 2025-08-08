@@ -104,23 +104,61 @@ def _vectorized_categorical_sampling(
     return choices
 
 
-def _csr_multinomial(
-    n: int,
-    p_mat: np.ndarray,
-    n_iter: int,
-    encoding: np.ndarray,
-):
-    if n == 0:
-        return csr_matrix((n_iter, p_mat.shape[1]), dtype=int)
+def _multinomial_over_range(
+    encoding: np.ndarray, n_iter: int, left_n: int, right_n: int
+) -> tuple[np.ndarray, np.ndarray]:
+    start_idx = n_iter * left_n
+    end_idx = start_idx + (right_n - left_n) * n_iter
+    return np.unique(encoding[start_idx:end_idx], return_counts=True)
 
-    # Vectorized count over all samples
-    unique_coords, counts = np.unique(encoding[: n_iter * n], return_counts=True)
 
+def _combine_multinomials_inplace(
+    coords_a: np.ndarray,
+    counts_a: np.ndarray,
+    used_a: int,
+    coords_b: np.ndarray,
+    counts_b: np.ndarray,
+    used_b: int,
+) -> int:
+    if used_b == 0:
+        return used_a
+
+    # Determine valid coordinates and counts for each
+    vcoords_a = coords_a[:used_a]
+    vcoords_b = coords_b[:used_b]
+    vcounts_b = counts_b[:used_b]
+
+    # Assume a non-overlap mask
+    non_overlap_mask = np.ones_like(vcoords_b, dtype=bool)
+
+    if used_a > 0:
+        # Find the overlapping indices
+        ix, xi, xj = np.intersect1d(vcoords_a, vcoords_b, return_indices=True)
+
+        # Update overlapping counts
+        if ix.size > 0:
+            counts_a[xi] += vcounts_b[xj]
+            non_overlap_mask[xj] = False
+
+    non_overlap_count = non_overlap_mask.sum()
+    if non_overlap_count > 0:
+        new_start = used_a
+        new_end = used_a + non_overlap_count
+
+        coords_a[new_start:new_end] = vcoords_b[non_overlap_mask]
+        counts_a[new_start:new_end] = vcounts_b[non_overlap_mask]
+
+    return used_a + non_overlap_count
+
+
+def _build_csr(
+    coords: np.ndarray, counts: np.ndarray, n_cat: int, n_iter: int
+) -> csr_matrix:
     # Decode coordinates back to the original categories
-    rows = unique_coords // p_mat.shape[1]
-    cols = unique_coords % p_mat.shape[1]
+    rows = coords // n_cat
+    cols = coords % n_cat
 
-    return csr_matrix((counts, (rows, cols)), shape=(n_iter, p_mat.shape[1]), dtype=int)
+    return csr_matrix((counts, (rows, cols)), shape=(n_iter, n_cat), dtype=int)
 
 
 def _score_simulations(
@@ -171,16 +209,36 @@ def _score_simulations(
     #
     # All categories will be right-shifted by the total number of categories
     # for each iteration (ensuring each iteration has a unique range of categories)
-    encoding = sample_indices * p_hat.shape[1] + choices
+    n_cat = p_hat.shape[1]
+    encoding = sample_indices * n_cat + choices
+
+    # Preallocate coords and counts arrays
+    max_possible_coords = n_cat * n_iter  # theoretical fully dense matrix
+    coords = np.zeros(max_possible_coords, dtype=int)
+    counts = np.zeros(max_possible_coords, dtype=int)
+    used_coords = 0  # number of actually used coordinates
 
     # For each unique total sample all iterations at once and score
     scores = np.zeros((unique_totals.size, n_iter))
+
+    last_total = 0
     for idx, total in tqdm(
         enumerate(unique_totals), desc="Scoring simulations", total=unique_totals.size
     ):
-        matrices = _csr_multinomial(total, p_hat, n_iter, encoding)
+        inc_coords, inc_counts = _multinomial_over_range(
+            encoding, n_iter, last_total, total
+        )
+        used_coords = _combine_multinomials_inplace(
+            coords,
+            counts,
+            used_coords,
+            inc_coords,
+            inc_counts,
+            inc_coords.size,
+        )
+        matrix = _build_csr(coords, counts, n_cat, n_iter)
         scores[idx] = _eval_log_likelihood(
-            alpha, matrices, np.repeat(total, n_iter), probs
+            alpha, matrix, np.repeat(total, n_iter), probs
         )
 
     return scores
