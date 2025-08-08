@@ -5,13 +5,16 @@ import numpy as np
 from scipy.optimize import OptimizeResult, minimize_scalar
 from scipy.sparse import csr_matrix
 from scipy.special import betaln
+from tqdm import tqdm
 
 from ._sgt import simple_good_turing
 
-UMI_THRESHOLD = 10
+UMI_THRESHOLD = 100
+N_SIMULATIONS = 1000
+SEED = 42
 
 
-def _eval_neg_log_likelihood(
+def _eval_log_likelihood(
     alpha: float,
     matrix: csr_matrix,
     total: np.ndarray,
@@ -46,7 +49,7 @@ def _eval_neg_log_likelihood(
         ub = matrix.indptr[idx + 1]  # Pull the right-bound of the summation
         likelihoods[idx] -= np.sum(summation_terms[lb:ub])
 
-    # Return the negative log likelihood
+    # Return the log likelihood
     return likelihoods
 
 
@@ -63,7 +66,7 @@ def _estimate_alpha(matrix: csr_matrix, probs: np.ndarray):
 
     # Optimize alpha
     result = minimize_scalar(
-        lambda alpha: -_eval_neg_log_likelihood(alpha, matrix, bc_sum, probs).sum(),
+        lambda alpha: -_eval_log_likelihood(alpha, matrix, bc_sum, probs).sum(),
         bounds=(1e-6, 1000),
         method="bounded",
     )
@@ -72,9 +75,112 @@ def _estimate_alpha(matrix: csr_matrix, probs: np.ndarray):
     return result.x
 
 
+def _csr_multinomial(n: int, p_mat: np.ndarray, n_iter: int, rng):
+    """Perform an efficient sampling from a multinomial distribution.
+
+    This works well when `n << len(p)` as the expected sampled matrix is sparse.
+
+    This function uses vectorized operations to efficiently sample from a multinomial distribution.
+    It's optimized for speed and memory efficiency.
+
+    # Inputs:
+    n: int
+        The number of trials for each sample
+    p_mat: np.ndarray
+        A 2D array of probabilities of size (n_iter, len(p))
+    n_iter: int
+        The number of iterations to perform
+    rng: np.random.Generator
+        The random number generator to use
+
+    # Outputs:
+    csr_matrix
+        The sampled count matrix
+    """
+    if n == 0:
+        return csr_matrix((n_iter, p_mat.shape[1]), dtype=int)
+
+    # Draw choices for all iterations at once in a flat vec
+    choices = np.zeros((n * n_iter), dtype=int)
+    for idx in np.arange(n_iter):
+        start_idx = idx * n
+        choices[start_idx : start_idx + n] = rng.choice(
+            p_mat.shape[1], p=p_mat[idx], size=n
+        )
+
+    # Create the sample indices as a flat vec
+    sample_indices = np.repeat(np.arange(n_iter), n)
+
+    # Encode coordinates
+    #
+    # This shifts all choice categories by the category size
+    # providing a unique category set for each sample
+    coords = sample_indices * p_mat.shape[1] + choices
+
+    # Vectorized count over all samples
+    unique_coords, counts = np.unique(coords, return_counts=True)
+
+    # Decode coordinates back to the original categories
+    rows = unique_coords // p_mat.shape[1]
+    cols = unique_coords % p_mat.shape[1]
+
+    return csr_matrix((counts, (rows, cols)), shape=(n_iter, p_mat.shape[1]), dtype=int)
+
+
+def _score_simulations(
+    unique_totals: np.ndarray,
+    probs: np.ndarray,
+    alpha: float,
+    n_iter: int = N_SIMULATIONS,
+    seed: int = SEED,
+) -> np.ndarray:
+    """Score simulations for unique barcode umi totals.
+
+    This is a performance optimization that reuses the same resampled matrices
+    for a specific barcode UMI total.
+
+    # Inputs:
+    unique_totals: np.ndarray
+        The unique barcode UMI totals to score
+    probs: np.ndarray
+        The probability of each gene being expressed
+    alpha: float
+        The alpha parameter of the DM distribution
+    n_iter: int
+        The number of simulations to run
+    seed: int
+        The random seed to use for the simulations
+
+    # Outputs:
+    scores: np.ndarray (unique_totals.size, n_iter)
+    """
+    rng = np.random.default_rng(seed=seed)
+
+    # Convert unique_totals to integer array
+    unique_totals = unique_totals.astype(int)
+    print(f"Performing {unique_totals.size} simulations...", file=sys.stderr)
+
+    # Sample the adjusted multinomial probabilities for all iterations at once
+    p_hat = rng.dirichlet(alpha * probs, size=n_iter)
+
+    # For each unique total sample all iterations at once and score
+    scores = np.zeros((unique_totals.size, n_iter))
+    for idx, total in tqdm(
+        enumerate(unique_totals), desc="Scoring simulations", total=unique_totals.size
+    ):
+        matrices = _csr_multinomial(total, p_hat, n_iter, rng)
+        scores[idx] = _eval_log_likelihood(
+            alpha, matrices, np.repeat(total, n_iter), probs
+        )
+
+    return scores
+
+
 def empty_drops(
     adata: ad.AnnData,
     threshold: float | int = UMI_THRESHOLD,
+    n_iter: int = N_SIMULATIONS,
+    seed: int = SEED,
 ):
     if not isinstance(adata.X, csr_matrix):
         print("Converting data to csr_matrix...", file=sys.stderr)
@@ -103,4 +209,8 @@ def empty_drops(
     # Estimate alpha
     alpha = _estimate_alpha(amb_matrix, probs)
 
-    return {"probs": probs, "alpha": alpha}
+    # Score simulations
+    unique_totals = np.unique(cell_umi_counts)
+    scores = _score_simulations(unique_totals, probs, alpha, n_iter=n_iter, seed=seed)
+
+    return {"probs": probs, "alpha": alpha, "scores": scores}
