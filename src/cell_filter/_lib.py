@@ -165,7 +165,7 @@ def _score_simulations(
     choices = _vectorized_categorical_sampling(unique_totals.max(), p_hat, n_iter, rng)
 
     # Precompute the sample indices
-    sample_indices = np.repeat(np.arange(n_iter), unique_totals.max())
+    sample_indices = np.tile(np.arange(n_iter), unique_totals.max())
 
     # Encode the categorical choices
     #
