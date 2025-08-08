@@ -79,27 +79,31 @@ def _estimate_alpha(matrix: csr_matrix, probs: np.ndarray):
 
 
 def _multi_sample_preallocated(
-    choices: np.ndarray, n: int, p_mat: np.ndarray, n_iter: int, rng
+    choices: np.ndarray,
+    categories: np.ndarray,
+    n: int,
+    p_mat: np.ndarray,
+    n_iter: int,
+    last_n: int,
+    rng,
 ):
-    """Sample random categories into a preallocated array.
+    """Fills a buffer with random categories between for the range `last_n: n`
 
-    # Inputs:
-    choices: np.ndarray
-        The array to store the sampled categories
-    n: int
-        The number of categories to sample
-    p_mat: np.ndarray
-        The probability matrix of shape (n_iter, n_categories)
-    n_iter: int
-        The number of iterations to perform
-    rng: np.random.Generator
-        The random number generator to use
+    Layout is:
+    [n=1   ] [n=2   ] [n=3   ] [...]
+    [n_iter] [n_iter] [n_iter] [...]
     """
-    for idx in np.arange(n_iter):
-        start_idx = idx * n
-        choices[start_idx : start_idx + n] = rng.choice(
-            p_mat.shape[1], p=p_mat[idx], size=n
-        )
+    if last_n >= n:
+        return
+
+    for n_idx in np.arange(last_n, n):
+        start_idx = n_idx * n_iter
+        for s_idx in np.arange(n_iter):
+            choices[start_idx + s_idx] = rng.choice(
+                a=categories,
+                p=p_mat[s_idx],
+                size=1,
+            )
 
 
 def _csr_multinomial(n: int, p_mat: np.ndarray, n_iter: int, choices: np.ndarray):
@@ -117,8 +121,11 @@ def _csr_multinomial(n: int, p_mat: np.ndarray, n_iter: int, choices: np.ndarray
         A 2D array of probabilities of size (n_iter, len(p))
     n_iter: int
         The number of iterations to perform
-    rng: np.random.Generator
-        The random number generator to use
+    choices: np.ndarray
+        The sampled categories for each sample (1D).
+        This array is arranged as follows:
+            [n=1   ] [n=2   ] [n=3   ] [...]
+            [n_iter] [n_iter] [n_iter] [...]
 
     # Outputs:
     csr_matrix
@@ -181,6 +188,7 @@ def _score_simulations(
 
     # Sample the adjusted multinomial probabilities for all iterations at once
     p_hat = rng.dirichlet(alpha * probs, size=n_iter)
+    categories = np.arange(p_hat.shape[1])
 
     # Preallocate the choice array
     max_total = unique_totals.max()
@@ -188,14 +196,18 @@ def _score_simulations(
 
     # For each unique total sample all iterations at once and score
     scores = np.zeros((unique_totals.size, n_iter))
+    last_total = 0
     for idx, total in tqdm(
         enumerate(unique_totals), desc="Scoring simulations", total=unique_totals.size
     ):
-        _multi_sample_preallocated(choices, total, p_hat, n_iter, rng)
+        _multi_sample_preallocated(
+            choices, categories, total, p_hat, n_iter, last_total, rng
+        )
         matrices = _csr_multinomial(total, p_hat, n_iter, choices)
         scores[idx] = _eval_log_likelihood(
             alpha, matrices, np.repeat(total, n_iter), probs
         )
+        last_total = total
 
     return scores
 
