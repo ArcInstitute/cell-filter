@@ -1,5 +1,4 @@
 import logging
-import sys
 
 import anndata as ad
 import numpy as np
@@ -78,35 +77,40 @@ def _estimate_alpha(matrix: csr_matrix, probs: np.ndarray):
     return result.x
 
 
-def _multi_sample_preallocated(
-    choices: np.ndarray,
-    categories: np.ndarray,
+def _vectorized_categorical_sampling(
     n: int,
     p_mat: np.ndarray,
     n_iter: int,
-    last_n: int,
     rng,
-):
-    """Fills a buffer with random categories between for the range `last_n: n`
+) -> np.ndarray:
+    """Fills a buffer with random categories.
+
+    This is used to simulate a non-unique categorical distribution which can
+    then be counted to generate a multinomial distribution.
+
+    It is an optimization for cases where `n` is small compared to the number of categories
+    and the expected number of categories sampled is sparse.
 
     Layout is:
     [n=1   ] [n=2   ] [n=3   ] [...]
     [n_iter] [n_iter] [n_iter] [...]
     """
-    if last_n >= n:
-        return
-
-    for n_idx in np.arange(last_n, n):
-        start_idx = n_idx * n_iter
-        for s_idx in np.arange(n_iter):
-            choices[start_idx + s_idx] = rng.choice(
-                a=categories,
-                p=p_mat[s_idx],
-                size=1,
-            )
+    choices = np.zeros(n_iter * n, dtype=int)
+    for s_idx in np.arange(n_iter):
+        start_idx = s_idx * n
+        choices[start_idx : start_idx + n] = rng.choice(
+            a=p_mat.shape[1], p=p_mat[s_idx], size=n
+        )
+    return choices
 
 
-def _csr_multinomial(n: int, p_mat: np.ndarray, n_iter: int, choices: np.ndarray):
+def _csr_multinomial(
+    n: int,
+    p_mat: np.ndarray,
+    n_iter: int,
+    choices: np.ndarray,
+    sample_indices: np.ndarray,
+):
     """Perform an efficient sampling from a multinomial distribution.
 
     This works well when `n << len(p)` as the expected sampled matrix is sparse.
@@ -134,14 +138,11 @@ def _csr_multinomial(n: int, p_mat: np.ndarray, n_iter: int, choices: np.ndarray
     if n == 0:
         return csr_matrix((n_iter, p_mat.shape[1]), dtype=int)
 
-    # Create the sample indices as a flat vec
-    sample_indices = np.repeat(np.arange(n_iter), n)
-
     # Encode coordinates
     #
     # This shifts all choice categories by the category size
     # providing a unique category set for each sample
-    coords = sample_indices * p_mat.shape[1] + choices[: n_iter * n]
+    coords = sample_indices[: n_iter * n] * p_mat.shape[1] + choices[: n_iter * n]
 
     # Vectorized count over all samples
     unique_coords, counts = np.unique(coords, return_counts=True)
@@ -184,30 +185,28 @@ def _score_simulations(
 
     # Convert unique_totals to integer array
     unique_totals = unique_totals.astype(int)
-    print(f"Performing {unique_totals.size} simulations...", file=sys.stderr)
+    logger.info(f"Performing {unique_totals.size} simulations...")
 
     # Sample the adjusted multinomial probabilities for all iterations at once
+    logger.info("Sampling from Dirichlet...")
     p_hat = rng.dirichlet(alpha * probs, size=n_iter)
-    categories = np.arange(p_hat.shape[1])
 
-    # Preallocate the choice array
-    max_total = unique_totals.max()
-    choices = np.zeros(max_total * n_iter, dtype=int)
+    # Precompute the categorical sampling
+    logger.info("Sampling Categories...")
+    choices = _vectorized_categorical_sampling(unique_totals.max(), p_hat, n_iter, rng)
+
+    # Precompute the sample indices
+    sample_indices = np.repeat(np.arange(n_iter), unique_totals.max())
 
     # For each unique total sample all iterations at once and score
     scores = np.zeros((unique_totals.size, n_iter))
-    last_total = 0
     for idx, total in tqdm(
         enumerate(unique_totals), desc="Scoring simulations", total=unique_totals.size
     ):
-        _multi_sample_preallocated(
-            choices, categories, total, p_hat, n_iter, last_total, rng
-        )
-        matrices = _csr_multinomial(total, p_hat, n_iter, choices)
+        matrices = _csr_multinomial(total, p_hat, n_iter, choices, sample_indices)
         scores[idx] = _eval_log_likelihood(
             alpha, matrices, np.repeat(total, n_iter), probs
         )
-        last_total = total
 
     return scores
 
