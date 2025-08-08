@@ -10,36 +10,6 @@ from ._sgt import simple_good_turing
 UMI_THRESHOLD = 10
 
 
-def _log_dm_lik(
-    alpha: float,
-    total: float,
-    counts: csr_matrix,
-    probs: np.ndarray,
-):
-    """Log of the Dirichlet-Multinomial Likelihood.
-
-    # Arguments
-    alpha: float
-        The scaling factor for the Dirichlet prior
-    total: float
-        The total number of transcripts for barcode `b`
-    counts: np.ndarray
-        The observed counts for each gene in barcode `b`
-    probs: np.ndarray
-        The probability of each gene being expressed
-    """
-    # Constant term
-    constant = np.log(total) + betaln(total, alpha)
-    alpha_g = alpha * probs
-
-    # Summation term
-    summation = np.sum(
-        np.log(counts.data) + betaln(counts.data, alpha_g[counts.indices])
-    )
-
-    return constant - summation
-
-
 def _eval_neg_log_likelihood(
     alpha: float,
     matrix: csr_matrix,
@@ -47,6 +17,8 @@ def _eval_neg_log_likelihood(
     probs: np.ndarray,
 ):
     """Evaluate the negative log likelihood of the Dirichlet-Multinomial distribution.
+
+    Uses an efficient vectorized implementation.
 
     # Arguments
     alpha: float
@@ -58,9 +30,22 @@ def _eval_neg_log_likelihood(
     probs: np.ndarray
         The probability of each gene being expressed
     """
-    likelihoods = np.zeros_like(total)
-    for idx in np.arange(total.size):
-        likelihoods[idx] = _log_dm_lik(alpha, total[idx], matrix[idx], probs)
+    # Scale the gene probabilities
+    alpha_g = alpha * probs
+
+    # Calculate bc-constant term before loop
+    likelihoods = np.log(total) + betaln(total, alpha)
+
+    # Calculate the vectorized summation term
+    summation_terms = np.log(matrix.data) + betaln(matrix.data, alpha_g[matrix.indices])
+
+    # Update the likelihood inplace
+    for idx in np.arange(matrix.indptr.size - 1):
+        lb = matrix.indptr[idx]  # Pull the left-bound of the summation
+        ub = matrix.indptr[idx + 1]  # Pull the right-bound of the summation
+        likelihoods[idx] -= np.sum(summation_terms[lb:ub])
+
+    # Return the negative log likelihood
     return -likelihoods.sum()
 
 
