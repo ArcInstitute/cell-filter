@@ -7,10 +7,7 @@ authors = [
     { name = "noam teyssier", email = "22600644+noamteyssier@users.noreply.github.com" },
 ]
 requires-python = ">=3.13"
-dependencies = [
-    "anndata>=0.12.1",
-    "tqdm>=4.67.1",
-]
+dependencies = ["anndata>=0.12.1", "tqdm>=4.67.1"]
 
 [build-system]
 requires = ["hatchling"]
@@ -25,5 +22,6 @@ dev = [
     "marimo>=0.14.16",
     "matplotlib>=3.10.5",
     "polars>=1.32.1",
+    "pyinstrument>=5.0.3",
     "seaborn>=0.13.2",
 ]
