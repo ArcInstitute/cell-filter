@@ -47,7 +47,7 @@ def _eval_neg_log_likelihood(
         likelihoods[idx] -= np.sum(summation_terms[lb:ub])
 
     # Return the negative log likelihood
-    return -likelihoods.sum()
+    return likelihoods
 
 
 def _estimate_alpha(matrix: csr_matrix, probs: np.ndarray):
@@ -63,7 +63,7 @@ def _estimate_alpha(matrix: csr_matrix, probs: np.ndarray):
 
     # Optimize alpha
     result = minimize_scalar(
-        lambda x: _eval_neg_log_likelihood(x, matrix, bc_sum, probs).sum(),
+        lambda alpha: -_eval_neg_log_likelihood(alpha, matrix, bc_sum, probs).sum(),
         bounds=(1e-6, 1000),
         method="bounded",
     )
@@ -103,4 +103,4 @@ def empty_drops(
     # Estimate alpha
     alpha = _estimate_alpha(amb_matrix, probs)
 
-    return alpha
+    return {"probs": probs, "alpha": alpha}
