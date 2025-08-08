@@ -173,9 +173,6 @@ def _score_simulations(
     # for each iteration (ensuring each iteration has a unique range of categories)
     encoding = sample_indices * p_hat.shape[1] + choices
 
-    # Presort the encoding array
-    np.sort(encoding)
-
     # For each unique total sample all iterations at once and score
     scores = np.zeros((unique_totals.size, n_iter))
     for idx, total in tqdm(
