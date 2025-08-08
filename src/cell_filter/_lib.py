@@ -1,3 +1,4 @@
+import logging
 import sys
 
 import anndata as ad
@@ -8,6 +9,8 @@ from scipy.special import betaln
 from tqdm import tqdm
 
 from ._sgt import simple_good_turing
+
+logger = logging.getLogger(__name__)
 
 UMI_THRESHOLD = 100
 N_SIMULATIONS = 1000
@@ -181,36 +184,56 @@ def empty_drops(
     threshold: float | int = UMI_THRESHOLD,
     n_iter: int = N_SIMULATIONS,
     seed: int = SEED,
+    n_processes: int | None = None,
+    chunk_size: int | None = None,
 ):
+    logging.basicConfig(level=logging.INFO)
+    """Empty drops detection with optional multiprocessing."""
     if not isinstance(adata.X, csr_matrix):
-        print("Converting data to csr_matrix...", file=sys.stderr)
+        logger.info("Converting data to csr_matrix...")
         adata.X = csr_matrix(adata.X)
-        print("Finished converting data to csr_matrix.", file=sys.stderr)
+        logger.info("Finished converting data to csr_matrix.")
 
     # Extract matrix from AnnData object
     matrix = adata.X
 
     if threshold <= 0:
+        logger.error("threshold must be positive non-zero")
         raise ValueError("threshold must be positive non-zero")
 
     # Determine cell UMI counts
+    logger.info("Determining cell UMI counts...")
     cell_umi_counts = np.array(matrix.sum(axis=1)).flatten()
 
     # Identify ambient cells
+    logger.info("Identifying ambient cells...")
     ambient_mask = cell_umi_counts < threshold
 
     # Extract ambient matrix
+    logger.info("Extracting ambient matrix...")
     amb_matrix = matrix[ambient_mask]
+
+    logger.info("Calculating ambient gene sum...")
     ambient_gene_sum = np.array(amb_matrix.sum(axis=0)).flatten()
 
     # Convert probabilities
+    logger.info("Converting probabilities (SGT)...")
     probs = simple_good_turing(ambient_gene_sum)
 
     # Estimate alpha
+    logger.info("Maximum likelihood estimation of alpha...")
     alpha = _estimate_alpha(amb_matrix, probs)
 
-    # Score simulations
+    # Score simulations (now with multiprocessing)
     unique_totals = np.unique(cell_umi_counts)
-    scores = _score_simulations(unique_totals, probs, alpha, n_iter=n_iter, seed=seed)
+    logger.info(f"Scoring simulations for {len(unique_totals)} unique totals")
+
+    scores = _score_simulations(
+        unique_totals,
+        probs,
+        alpha,
+        n_iter=n_iter,
+        seed=seed,
+    )
 
     return {"probs": probs, "alpha": alpha, "scores": scores}
