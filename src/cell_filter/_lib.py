@@ -78,7 +78,31 @@ def _estimate_alpha(matrix: csr_matrix, probs: np.ndarray):
     return result.x
 
 
-def _csr_multinomial(n: int, p_mat: np.ndarray, n_iter: int, rng):
+def _multi_sample_preallocated(
+    choices: np.ndarray, n: int, p_mat: np.ndarray, n_iter: int, rng
+):
+    """Sample random categories into a preallocated array.
+
+    # Inputs:
+    choices: np.ndarray
+        The array to store the sampled categories
+    n: int
+        The number of categories to sample
+    p_mat: np.ndarray
+        The probability matrix of shape (n_iter, n_categories)
+    n_iter: int
+        The number of iterations to perform
+    rng: np.random.Generator
+        The random number generator to use
+    """
+    for idx in np.arange(n_iter):
+        start_idx = idx * n
+        choices[start_idx : start_idx + n] = rng.choice(
+            p_mat.shape[1], p=p_mat[idx], size=n
+        )
+
+
+def _csr_multinomial(n: int, p_mat: np.ndarray, n_iter: int, choices: np.ndarray):
     """Perform an efficient sampling from a multinomial distribution.
 
     This works well when `n << len(p)` as the expected sampled matrix is sparse.
@@ -103,14 +127,6 @@ def _csr_multinomial(n: int, p_mat: np.ndarray, n_iter: int, rng):
     if n == 0:
         return csr_matrix((n_iter, p_mat.shape[1]), dtype=int)
 
-    # Draw choices for all iterations at once in a flat vec
-    choices = np.zeros((n * n_iter), dtype=int)
-    for idx in np.arange(n_iter):
-        start_idx = idx * n
-        choices[start_idx : start_idx + n] = rng.choice(
-            p_mat.shape[1], p=p_mat[idx], size=n
-        )
-
     # Create the sample indices as a flat vec
     sample_indices = np.repeat(np.arange(n_iter), n)
 
@@ -118,7 +134,7 @@ def _csr_multinomial(n: int, p_mat: np.ndarray, n_iter: int, rng):
     #
     # This shifts all choice categories by the category size
     # providing a unique category set for each sample
-    coords = sample_indices * p_mat.shape[1] + choices
+    coords = sample_indices * p_mat.shape[1] + choices[: n_iter * n]
 
     # Vectorized count over all samples
     unique_coords, counts = np.unique(coords, return_counts=True)
@@ -166,12 +182,17 @@ def _score_simulations(
     # Sample the adjusted multinomial probabilities for all iterations at once
     p_hat = rng.dirichlet(alpha * probs, size=n_iter)
 
+    # Preallocate the choice array
+    max_total = unique_totals.max()
+    choices = np.zeros(max_total * n_iter, dtype=int)
+
     # For each unique total sample all iterations at once and score
     scores = np.zeros((unique_totals.size, n_iter))
     for idx, total in tqdm(
         enumerate(unique_totals), desc="Scoring simulations", total=unique_totals.size
     ):
-        matrices = _csr_multinomial(total, p_hat, n_iter, rng)
+        _multi_sample_preallocated(choices, total, p_hat, n_iter, rng)
+        matrices = _csr_multinomial(total, p_hat, n_iter, choices)
         scores[idx] = _eval_log_likelihood(
             alpha, matrices, np.repeat(total, n_iter), probs
         )
