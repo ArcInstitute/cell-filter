@@ -118,26 +118,20 @@ def _combine_multinomials_inplace(
     used_a: int,
     coords_b: np.ndarray,
     counts_b: np.ndarray,
-    used_b: int,
 ) -> int:
-    if used_b == 0:
-        return used_a
-
     # Determine valid coordinates and counts for each
     vcoords_a = coords_a[:used_a]
-    vcoords_b = coords_b[:used_b]
-    vcounts_b = counts_b[:used_b]
 
     # Assume a non-overlap mask
-    non_overlap_mask = np.ones_like(vcoords_b, dtype=bool)
+    non_overlap_mask = np.ones_like(coords_b, dtype=bool)
 
     if used_a > 0:
         # Find the overlapping indices
-        ix, xi, xj = np.intersect1d(vcoords_a, vcoords_b, return_indices=True)
+        ix, xi, xj = np.intersect1d(vcoords_a, coords_b, return_indices=True)
 
         # Update overlapping counts
         if ix.size > 0:
-            counts_a[xi] += vcounts_b[xj]
+            counts_a[xi] += counts_b[xj]
             non_overlap_mask[xj] = False
 
     non_overlap_count = non_overlap_mask.sum()
@@ -145,8 +139,8 @@ def _combine_multinomials_inplace(
         new_start = used_a
         new_end = used_a + non_overlap_count
 
-        coords_a[new_start:new_end] = vcoords_b[non_overlap_mask]
-        counts_a[new_start:new_end] = vcounts_b[non_overlap_mask]
+        coords_a[new_start:new_end] = coords_b[non_overlap_mask]
+        counts_a[new_start:new_end] = counts_b[non_overlap_mask]
 
     return used_a + non_overlap_count
 
@@ -234,7 +228,6 @@ def _score_simulations(
             used_coords,
             inc_coords,
             inc_counts,
-            inc_coords.size,
         )
         matrix = _build_csr(coords, counts, n_cat, n_iter)
         scores[idx] = _eval_log_likelihood(
