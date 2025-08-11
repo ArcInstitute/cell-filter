@@ -1,6 +1,7 @@
 import logging
 
 import anndata as ad
+import numba as nb
 import numpy as np
 from scipy.optimize import OptimizeResult, minimize_scalar
 from scipy.sparse import csr_matrix
@@ -8,6 +9,7 @@ from scipy.special import betaln
 from tqdm import tqdm
 
 from ._sgt import simple_good_turing
+from ._utils import jit_intersect1d
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +48,9 @@ def _eval_log_likelihood(
     summation_terms = np.log(matrix.data) + betaln(matrix.data, alpha_g[matrix.indices])
 
     # Update the likelihood inplace
-    for idx in np.arange(matrix.indptr.size - 1):
-        lb = matrix.indptr[idx]  # Pull the left-bound of the summation
-        ub = matrix.indptr[idx + 1]  # Pull the right-bound of the summation
-        likelihoods[idx] -= np.sum(summation_terms[lb:ub])
+    likelihoods[: matrix.indptr.size - 1] -= np.add.reduceat(
+        summation_terms, matrix.indptr[:-1]
+    )
 
     # Return the log likelihood
     return likelihoods
@@ -112,6 +113,7 @@ def _multinomial_over_range(
     return np.unique(encoding[start_idx:end_idx], return_counts=True)
 
 
+@nb.njit()
 def _combine_multinomials_inplace(
     coords_a: np.ndarray,
     counts_a: np.ndarray,
@@ -123,11 +125,11 @@ def _combine_multinomials_inplace(
     vcoords_a = coords_a[:used_a]
 
     # Assume a non-overlap mask
-    non_overlap_mask = np.ones_like(coords_b, dtype=bool)
+    non_overlap_mask = np.ones_like(coords_b, dtype=np.bool)
 
     if used_a > 0:
         # Find the overlapping indices
-        ix, xi, xj = np.intersect1d(vcoords_a, coords_b, return_indices=True)
+        ix, xi, xj = jit_intersect1d(vcoords_a, coords_b)
 
         # Update overlapping counts
         if ix.size > 0:
@@ -145,14 +147,16 @@ def _combine_multinomials_inplace(
     return used_a + non_overlap_count
 
 
-def _build_csr(
-    coords: np.ndarray, counts: np.ndarray, n_cat: int, n_iter: int
-) -> csr_matrix:
+def _fill_csr_components(
+    coords: np.ndarray,
+    rows: np.ndarray,
+    cols: np.ndarray,
+    used: int,
+    n_cat: int,
+):
     # Decode coordinates back to the original categories
-    rows = coords // n_cat
-    cols = coords % n_cat
-
-    return csr_matrix((counts, (rows, cols)), shape=(n_iter, n_cat), dtype=int)
+    rows[:used] = coords[:used] // n_cat
+    cols[:used] = coords[:used] % n_cat
 
 
 def _score_simulations(
@@ -161,7 +165,12 @@ def _score_simulations(
     alpha: float,
     n_iter: int = N_SIMULATIONS,
     seed: int = SEED,
-) -> np.ndarray:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+]:
     """Score simulations for unique barcode umi totals.
 
     This is a performance optimization that reuses the same resampled matrices
@@ -210,6 +219,8 @@ def _score_simulations(
     max_possible_coords = n_cat * n_iter  # theoretical fully dense matrix
     coords = np.zeros(max_possible_coords, dtype=int)
     counts = np.zeros(max_possible_coords, dtype=int)
+    rows = np.zeros(max_possible_coords, dtype=int)
+    cols = np.zeros(max_possible_coords, dtype=int)
     used_coords = 0  # number of actually used coordinates
 
     # For each unique total sample all iterations at once and score
@@ -229,12 +240,19 @@ def _score_simulations(
             inc_coords,
             inc_counts,
         )
-        matrix = _build_csr(coords[:used_coords], counts[:used_coords], n_cat, n_iter)
+        _fill_csr_components(coords, rows, cols, used_coords, n_cat)
+        matrix = csr_matrix(
+            (counts[:used_coords], (rows[:used_coords], cols[:used_coords])),
+            shape=(n_iter, n_cat),
+        )
         scores[idx] = _eval_log_likelihood(
-            alpha, matrix, np.repeat(total, n_iter), probs
+            alpha,
+            matrix,
+            np.repeat(total, n_iter),
+            probs,
         )
 
-    return scores
+    return (scores, coords, counts, used_coords)
 
 
 def empty_drops(
@@ -284,7 +302,7 @@ def empty_drops(
     unique_totals = np.unique(cell_umi_counts)
     logger.info(f"Scoring simulations for {len(unique_totals)} unique totals")
 
-    scores = _score_simulations(
+    scores, counts, coords, used_coords = _score_simulations(
         unique_totals,
         probs,
         alpha,
@@ -292,4 +310,11 @@ def empty_drops(
         seed=seed,
     )
 
-    return {"probs": probs, "alpha": alpha, "scores": scores}
+    return {
+        "probs": probs,
+        "alpha": alpha,
+        "scores": scores,
+        "counts": counts,
+        "coords": coords,
+        "used_coords": used_coords,
+    }
