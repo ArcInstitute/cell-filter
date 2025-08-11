@@ -229,7 +229,7 @@ def _score_simulations(
             inc_coords,
             inc_counts,
         )
-        matrix = _build_csr(coords, counts, n_cat, n_iter)
+        matrix = _build_csr(coords[:used_coords], counts[:used_coords], n_cat, n_iter)
         scores[idx] = _eval_log_likelihood(
             alpha, matrix, np.repeat(total, n_iter), probs
         )
