@@ -77,32 +77,39 @@ def _estimate_alpha(matrix: csr_matrix, probs: np.ndarray):
 
 
 def _vectorized_categorical_sampling(
-    n: int,
-    p_mat: np.ndarray,
-    n_iter: int,
-    rng,
+    n: int, p_mat: np.ndarray, n_iter: int, rng
 ) -> np.ndarray:
     """Fills a buffer with random categories.
 
-    This is used to simulate a non-unique categorical distribution which can
-    then be counted to generate a multinomial distribution.
-
-    It is an optimization for cases where `n` is small compared to the number of categories
-    and the expected number of categories sampled is sparse.
-
-    Layout is:
-    [n=1   ] [n=2   ] [n=3   ] [...]
-    [n_iter] [n_iter] [n_iter] [...]
+    Layout during draw step:
+    [n_iter=1] [n_iter=2] [n_iter=3]
+    [0..n    ] [0..n    ] [0..n    ]
     """
-    choices = np.zeros(n_iter * n, dtype=int)
-    for s_idx in tqdm(
-        np.arange(n_iter), total=n_iter, desc="Sampling draws from Multinomials..."
-    ):
-        start_idx = s_idx * n
-        choices[start_idx : start_idx + n] = rng.choice(
-            a=p_mat.shape[1], p=p_mat[s_idx], size=n
-        )
-    return choices
+    # Determine the number of categories
+    n_cat = p_mat.shape[1]
+
+    # Initialize the category lookup array
+    categories = np.arange(n_cat, dtype=int)
+
+    # build a reusable rng buffer
+    rand_buffer = np.zeros(n)
+
+    # Calculate the cumulative probabilities of the categories
+    cumulative_probs = p_mat.cumsum(axis=1)
+
+    draws = np.zeros((n_iter, n), dtype=int)
+    for idx in tqdm(np.arange(n_iter), desc="Drawing from Multinomials..."):
+        rng.random(out=rand_buffer)
+        draws[idx] = categories[
+            np.searchsorted(
+                cumulative_probs[idx],
+                rand_buffer,
+                side="right",
+            )
+        ]
+
+    # matrix: (n x n_iter)
+    return draws.T
 
 
 def _evaluate_simulations(
@@ -119,21 +126,18 @@ def _evaluate_simulations(
     p_hat = rng.dirichlet(alpha * probs, size=n_iter)
 
     # Vectorized categorical sampling for all iterations and draw sizes at once
-    choices = _vectorized_categorical_sampling(
+    choice_matrix = _vectorized_categorical_sampling(
         max_total,
         p_hat,
         n_iter,
         rng,
-    )
-
-    # Reshape the choice vector into a 2D matrix
-    choice_matrix = choices.reshape(max_total, n_iter)
+    )  # size : (max_total x n_iter)
 
     # Initialize the incremental count matrix
-    z_matrix = np.zeros((n_iter, probs.size))
+    z_matrix = np.zeros((n_iter, probs.size), dtype=int)
 
     # Initialize the sample indices for quick lookups
-    sample_index = np.arange(n_iter)
+    sample_index = np.arange(n_iter, dtype=int)
 
     # Precompute the $\alpha p_g$ value
     ap = alpha * probs
