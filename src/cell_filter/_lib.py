@@ -1,7 +1,6 @@
 import logging
 
 import anndata as ad
-import numba as nb
 import numpy as np
 from scipy.optimize import OptimizeResult, minimize_scalar
 from scipy.sparse import csr_matrix
@@ -9,7 +8,6 @@ from scipy.special import betaln
 from tqdm import tqdm
 
 from ._sgt import simple_good_turing
-from ._utils import jit_intersect1d
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +95,9 @@ def _vectorized_categorical_sampling(
     [n_iter] [n_iter] [n_iter] [...]
     """
     choices = np.zeros(n_iter * n, dtype=int)
-    for s_idx in np.arange(n_iter):
+    for s_idx in tqdm(
+        np.arange(n_iter), total=n_iter, desc="Sampling draws from Multinomials..."
+    ):
         start_idx = s_idx * n
         choices[start_idx : start_idx + n] = rng.choice(
             a=p_mat.shape[1], p=p_mat[s_idx], size=n
@@ -105,154 +105,64 @@ def _vectorized_categorical_sampling(
     return choices
 
 
-def _multinomial_over_range(
-    encoding: np.ndarray, n_iter: int, left_n: int, right_n: int
-) -> tuple[np.ndarray, np.ndarray]:
-    start_idx = n_iter * left_n
-    end_idx = start_idx + (right_n - left_n) * n_iter
-    return np.unique(encoding[start_idx:end_idx], return_counts=True)
+def _evaluate_simulations(
+    max_total: int, n_iter: int, alpha: float, probs: np.ndarray, seed: int
+) -> np.ndarray:
+    # Ensure the max total is a discrete integer
+    max_total = int(max_total)
 
-
-@nb.njit()
-def _combine_multinomials_inplace(
-    coords_a: np.ndarray,
-    counts_a: np.ndarray,
-    used_a: int,
-    coords_b: np.ndarray,
-    counts_b: np.ndarray,
-) -> int:
-    # Determine valid coordinates and counts for each
-    vcoords_a = coords_a[:used_a]
-
-    # Assume a non-overlap mask
-    non_overlap_mask = np.ones_like(coords_b, dtype=np.bool)
-
-    if used_a > 0:
-        # Find the overlapping indices
-        ix, xi, xj = jit_intersect1d(vcoords_a, coords_b)
-
-        # Update overlapping counts
-        if ix.size > 0:
-            counts_a[xi] += counts_b[xj]
-            non_overlap_mask[xj] = False
-
-    non_overlap_count = non_overlap_mask.sum()
-    if non_overlap_count > 0:
-        new_start = used_a
-        new_end = used_a + non_overlap_count
-
-        coords_a[new_start:new_end] = coords_b[non_overlap_mask]
-        counts_a[new_start:new_end] = counts_b[non_overlap_mask]
-
-    return used_a + non_overlap_count
-
-
-def _fill_csr_components(
-    coords: np.ndarray,
-    rows: np.ndarray,
-    cols: np.ndarray,
-    used: int,
-    n_cat: int,
-):
-    # Decode coordinates back to the original categories
-    rows[:used] = coords[:used] // n_cat
-    cols[:used] = coords[:used] % n_cat
-
-
-def _score_simulations(
-    unique_totals: np.ndarray,
-    probs: np.ndarray,
-    alpha: float,
-    n_iter: int = N_SIMULATIONS,
-    seed: int = SEED,
-) -> tuple[
-    np.ndarray,
-    np.ndarray,
-    np.ndarray,
-    int,
-]:
-    """Score simulations for unique barcode umi totals.
-
-    This is a performance optimization that reuses the same resampled matrices
-    for a specific barcode UMI total.
-
-    # Inputs:
-    unique_totals: np.ndarray
-        The unique barcode UMI totals to score
-    probs: np.ndarray
-        The probability of each gene being expressed
-    alpha: float
-        The alpha parameter of the DM distribution
-    n_iter: int
-        The number of simulations to run
-    seed: int
-        The random seed to use for the simulations
-
-    # Outputs:
-    scores: np.ndarray (unique_totals.size, n_iter)
-    """
+    # Set the random seed
     rng = np.random.default_rng(seed=seed)
 
-    # Convert unique_totals to integer array
-    unique_totals = unique_totals.astype(int)
-    logger.info(f"Performing {unique_totals.size} simulations...")
-
-    # Sample the adjusted multinomial probabilities for all iterations at once
-    logger.info("Sampling from Dirichlet...")
+    # Sample the probabilities from a dirichlet
+    logger.info("Sampling priors from Dirichlet...")
     p_hat = rng.dirichlet(alpha * probs, size=n_iter)
 
-    # Precompute the categorical sampling
-    logger.info("Sampling Categories...")
-    choices = _vectorized_categorical_sampling(unique_totals.max(), p_hat, n_iter, rng)
+    # Vectorized categorical sampling for all iterations and draw sizes at once
+    choices = _vectorized_categorical_sampling(
+        max_total,
+        p_hat,
+        n_iter,
+        rng,
+    )
 
-    # Precompute the sample indices
-    sample_indices = np.tile(np.arange(n_iter), unique_totals.max())
+    # Reshape the choice vector into a 2D matrix
+    choice_matrix = choices.reshape(max_total, n_iter)
 
-    # Encode the categorical choices
-    #
-    # All categories will be right-shifted by the total number of categories
-    # for each iteration (ensuring each iteration has a unique range of categories)
-    n_cat = p_hat.shape[1]
-    encoding = sample_indices * n_cat + choices
+    # Initialize the incremental count matrix
+    z_matrix = np.zeros((n_iter, probs.size))
 
-    # Preallocate coords and counts arrays
-    max_possible_coords = n_cat * n_iter  # theoretical fully dense matrix
-    coords = np.zeros(max_possible_coords, dtype=int)
-    counts = np.zeros(max_possible_coords, dtype=int)
-    rows = np.zeros(max_possible_coords, dtype=int)
-    cols = np.zeros(max_possible_coords, dtype=int)
-    used_coords = 0  # number of actually used coordinates
+    # Initialize the sample indices for quick lookups
+    sample_index = np.arange(n_iter)
 
-    # For each unique total sample all iterations at once and score
-    scores = np.zeros((unique_totals.size, n_iter))
+    # Precompute the $\alpha p_g$ value
+    ap = alpha * probs
 
-    last_total = 0
-    for idx, total in tqdm(
-        enumerate(unique_totals), desc="Scoring simulations", total=unique_totals.size
+    # Initialize the log likelihood matrix
+    llik = np.zeros((max_total, n_iter))
+    for c_idx in tqdm(
+        np.arange(max_total), total=max_total, desc="Evaluating log likelihood..."
     ):
-        inc_coords, inc_counts = _multinomial_over_range(
-            encoding, n_iter, last_total, total
-        )
-        used_coords = _combine_multinomials_inplace(
-            coords,
-            counts,
-            used_coords,
-            inc_coords,
-            inc_counts,
-        )
-        _fill_csr_components(coords, rows, cols, used_coords, n_cat)
-        matrix = csr_matrix(
-            (counts[:used_coords], (rows[:used_coords], cols[:used_coords])),
-            shape=(n_iter, n_cat),
-        )
-        scores[idx] = _eval_log_likelihood(
-            alpha,
-            matrix,
-            np.repeat(total, n_iter),
-            probs,
+        # Set the multinomial draw size
+        ni = c_idx + 1
+
+        # Determine the draw identity for each iteration
+        choice_at_n = choice_matrix[c_idx]
+
+        # Isolate the draw and its associated count for each iteration
+        zki = z_matrix[sample_index, choice_at_n]
+        zki += 1
+
+        # Calculate the partial likelikelihood for the multinomial
+        llik[c_idx] = (
+            np.log(ni)
+            - np.log(ni + alpha - 1)
+            + np.log(zki + ap[choice_at_n] - 1)
+            - np.log(zki)
         )
 
-    return (scores, coords, counts, used_coords)
+    # Cumulative sum over each iteration for draw-specific likelihoods
+    return llik.cumsum(axis=0)
 
 
 def empty_drops(
@@ -302,19 +212,16 @@ def empty_drops(
     unique_totals = np.unique(cell_umi_counts)
     logger.info(f"Scoring simulations for {len(unique_totals)} unique totals")
 
-    scores, counts, coords, used_coords = _score_simulations(
-        unique_totals,
-        probs,
+    scores = _evaluate_simulations(
+        unique_totals.max(),
+        n_iter,
         alpha,
-        n_iter=n_iter,
-        seed=seed,
+        probs,
+        seed,
     )
 
     return {
         "probs": probs,
         "alpha": alpha,
         "scores": scores,
-        "counts": counts,
-        "coords": coords,
-        "used_coords": used_coords,
     }
