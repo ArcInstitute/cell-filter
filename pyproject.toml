@@ -7,7 +7,12 @@ authors = [
     { name = "noam teyssier", email = "22600644+noamteyssier@users.noreply.github.com" },
 ]
 requires-python = ">=3.13"
-dependencies = ["anndata>=0.12.1", "tqdm>=4.67.1"]
+dependencies = [
+    "anndata>=0.12.1",
+    "numba>=0.61.2",
+    "scipy>=1.16.1",
+    "tqdm>=4.67.1",
+]
 
 [build-system]
 requires = ["hatchling"]
