@@ -28,3 +28,10 @@ cell-filter <input.h5ad> <output.h5ad>
 ```
 
 Feel free to explore the code and adjust the parameters to suit your needs.
+
+## References
+
+1. [EmptyDrops](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-019-1662-y)
+2. [STARsolo](https://www.biorxiv.org/content/10.1101/2021.05.05.442755v1)
+3. [CellRanger](https://github.com/10xGenomics/cellranger)
+4. [Good-Turing frequency estimation without tears](https://doi.org/10.1080/09296179508590051)
