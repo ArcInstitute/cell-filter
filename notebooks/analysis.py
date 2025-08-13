@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.14.16"
+__generated_with = "0.14.17"
 app = marimo.App()
 
 
@@ -8,15 +8,13 @@ app = marimo.App()
 def _():
     import anndata as ad
     import numpy as np
-    import seaborn as sns
-    import matplotlib.pyplot as plt
-    from scipy.sparse import csr_matrix, csc_matrix
-    from pyinstrument import Profiler
+
     return (ad,)
 
 
 @app.cell
 def _(ad):
+    # Load in AnnData
     adata = ad.read_h5ad("./data/BC001.h5ad")
     return (adata,)
 
@@ -25,12 +23,11 @@ def _(ad):
 def _(adata):
     from cell_filter import empty_drops
 
-    filtered, result = empty_drops(adata, n_iter=50000)
-    return
-
-
-@app.cell
-def _():
+    # Filter AnnData
+    filtered, _stats = empty_drops(
+        adata,
+        n_iter=10000,
+    )
     return
 
 

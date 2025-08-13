@@ -66,5 +66,6 @@ def main(
     logger.info(f"Writing filtered h5ad to {path_filt}")
     filt.write_h5ad(path_filt)
 
+
 def app():
     typer.run(main)
