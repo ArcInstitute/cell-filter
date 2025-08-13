@@ -256,7 +256,6 @@ def empty_drops(
         logger.setLevel(logging.INFO)
         if logfile:
             logger.addHandler(logging.FileHandler(logfile))
-        logger.info("Verbose mode enabled")
     else:
         logger.setLevel(logging.WARNING)
 
@@ -315,7 +314,7 @@ def empty_drops(
     logger.info(f"Rejection boundary: {reject_boundary} UMIs")
 
     # Score simulations (now with multiprocessing)
-    logger.info(f"Evaluating simulations up to n={retain} unique totals")
+    logger.info(f"Evaluating s={n_iter} simulations up to n={retain} unique totals")
     sim_llik = _evaluate_simulations(
         retain,
         n_iter,
