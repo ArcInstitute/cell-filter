@@ -1,8 +1,9 @@
 [project]
 name = "cell-filter"
 version = "0.1.0"
-description = "Add your description here"
+description = "A python implementation of the EmptyDrops algorithm"
 readme = "README.md"
+license = "MIT"
 authors = [
     { name = "noam teyssier", email = "22600644+noamteyssier@users.noreply.github.com" },
 ]
