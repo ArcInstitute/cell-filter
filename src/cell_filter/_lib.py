@@ -10,8 +10,6 @@ from scipy.stats import false_discovery_control
 
 from ._sgt import simple_good_turing
 
-logger = logging.getLogger(__name__)
-
 # The minimum UMI threshold to immediately discard barcodes
 MIN_UMI_THRESHOLD = 500
 # The number of expected cells in the dataset
@@ -86,7 +84,7 @@ def _estimate_alpha(matrix: csr_matrix, probs: np.ndarray):
     # Optimize alpha
     result = minimize_scalar(
         lambda alpha: -_eval_log_likelihood(alpha, matrix, bc_sum, probs).sum(),
-        bounds=(1e-6, 1000),
+        bounds=(1e-6, 10000),
         method="bounded",
     )
     if not result.success or not isinstance(result, OptimizeResult):
@@ -235,6 +233,8 @@ def empty_drops(
     n_iter: int = N_SIMULATIONS,
     fdr_threshold: float = FDR_THRESHOLD,
     seed: int = SEED,
+    verbose: bool = False,
+    logfile: str | None = None,
 ) -> tuple[ad.AnnData, dict]:
     # Enforce typing on inputs
     min_umi_threshold = int(min_umi_threshold)
@@ -247,9 +247,19 @@ def empty_drops(
     n_iter = int(n_iter)
     fdr_threshold = float(fdr_threshold)
     seed = int(seed)
+    """Empty drops filtering"""
+    logger = logging.getLogger("cell-filter")
+    logging.basicConfig(
+        format="%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    if verbose or logfile:
+        logger.setLevel(logging.INFO)
+        if logfile:
+            logger.addHandler(logging.FileHandler(logfile))
+        logger.info("Verbose mode enabled")
+    else:
+        logger.setLevel(logging.WARNING)
 
-    logging.basicConfig(level=logging.INFO)
-    """Empty drops detection with optional multiprocessing."""
     if not isinstance(adata.X, csr_matrix):
         logger.info("Converting data to csr_matrix...")
         adata.X = csr_matrix(adata.X)
@@ -286,6 +296,7 @@ def empty_drops(
     # Estimate alpha
     logger.info("Maximum likelihood estimation of alpha...")
     alpha = _estimate_alpha(amb_matrix, probs)
+    logger.info(f"Optimized alpha={alpha:.4f}...")
 
     # Identify the retainment boundary
     max_ind = int(np.round(n_expected_cells * (1.0 - max_percentile)))
@@ -355,4 +366,5 @@ def empty_drops(
         "n_iter": n_iter,
     }
 
+    logger.info("Done!")
     return (adata[passing_cells], stats)
