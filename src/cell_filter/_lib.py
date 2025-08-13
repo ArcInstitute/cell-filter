@@ -245,6 +245,7 @@ def empty_drops(
 
     # Extract matrix from AnnData object
     matrix = adata.X
+    logger.info(f"Processing matrix size: {matrix.shape}")
 
     if min_umi_threshold <= 0:
         logger.error("threshold must be positive non-zero")
@@ -338,6 +339,7 @@ def empty_drops(
         "sim_llik": sim_llik,
         "obs_llik": obs_llik,
         "obs_totals": candidate_totals,
+        "n_iter": n_iter,
     }
 
     return (adata[passing_cells], stats)
