@@ -2,11 +2,11 @@ import logging
 
 import anndata as ad
 import numpy as np
+import numba as nb
 from scipy.optimize import OptimizeResult, minimize_scalar
 from scipy.sparse import csr_matrix
 from scipy.special import betaln
 from scipy.stats import false_discovery_control
-from tqdm import tqdm
 
 from ._sgt import simple_good_turing
 
@@ -40,7 +40,7 @@ def _eval_log_likelihood(
     total: np.ndarray,
     probs: np.ndarray,
 ):
-    """Evaluate the negative log likelihood of the Dirichlet-Multinomial distribution.
+    """Evaluate the log likelihood of the Dirichlet-Multinomial distribution.
 
     Uses an efficient vectorized implementation.
 
@@ -94,40 +94,73 @@ def _estimate_alpha(matrix: csr_matrix, probs: np.ndarray):
     return result.x
 
 
-def _vectorized_categorical_sampling(
-    n: int, p_mat: np.ndarray, n_iter: int, rng
-) -> np.ndarray:
-    """Fills a buffer with random categories.
+@nb.njit()
+def _fill_categories(
+    buffer: np.ndarray,
+    categories: np.ndarray,
+    rand_buffer: np.ndarray,
+    n: int,
+    p: np.ndarray,
+):
+    assert buffer.size == n, f"buffer size {buffer.size} != n {n}"
+    assert rand_buffer.size == n, f"rand_buffer size {rand_buffer.size} != n {n}"
+    assert categories.size == p.size, (
+        f"categories size {categories.size} != p size {p.size}"
+    )
+    rand_buffer[:] = np.random.random(size=rand_buffer.size)
+    buffer[:] = categories[
+        np.searchsorted(
+            np.cumsum(p),
+            rand_buffer,
+            side="right",
+        )
+    ]
 
-    Layout during draw step:
-    [n_iter=1] [n_iter=2] [n_iter=3]
-    [0..n    ] [0..n    ] [0..n    ]
-    """
-    # Determine the number of categories
-    n_cat = p_mat.shape[1]
 
-    # Initialize the category lookup array
-    categories = np.arange(n_cat, dtype=int)
+@nb.njit()
+def _fill_llik(
+    llik: np.ndarray,
+    z_buffer: np.ndarray,
+    p_buffer: np.ndarray,
+    c_buffer: np.ndarray,
+    categories: np.ndarray,
+    r_buffer: np.ndarray,
+    max_total: int,
+    alpha: float,
+    probs: np.ndarray,
+    n_iter: int,
+    seed: int,
+):
+    np.random.seed(seed)
+    ap = alpha * probs
+    for s_idx in np.arange(n_iter, dtype=np.int64):
+        # Clear the z_buffer
+        z_buffer[:] = 0
 
-    # build a reusable rng buffer
-    rand_buffer = np.zeros(n)
+        # Draw from dirichlet
+        p_buffer[:] = np.random.dirichlet(ap)
 
-    # Calculate the cumulative probabilities of the categories
-    cumulative_probs = p_mat.cumsum(axis=1)
+        # Draw all categories for iteration group at once
+        _fill_categories(c_buffer, categories, r_buffer, max_total, p_buffer)
 
-    draws = np.zeros((n_iter, n), dtype=int)
-    for idx in tqdm(np.arange(n_iter), desc="Drawing from Multinomials..."):
-        rng.random(out=rand_buffer)
-        draws[idx] = categories[
-            np.searchsorted(
-                cumulative_probs[idx],
-                rand_buffer,
-                side="right",
+        for n_idx in np.arange(max_total):
+            # set the multinomial draw size
+            ni = n_idx + 1
+
+            # Determine the draw identity for the iteration
+            choice_at_n = c_buffer[n_idx]
+
+            # Isolate the draw count and increment it
+            z_buffer[choice_at_n] += 1
+            zki = z_buffer[choice_at_n]
+
+            # Compute the partial log-likelihood for the multinomial
+            llik[n_idx, s_idx] = (
+                np.log(ni)
+                - np.log(ni + alpha - 1)
+                + np.log(zki + ap[choice_at_n] - 1)
+                - np.log(zki)
             )
-        ]
-
-    # matrix: (n x n_iter)
-    return draws.T
 
 
 def _evaluate_simulations(
@@ -136,64 +169,43 @@ def _evaluate_simulations(
     # Ensure the max total is a discrete integer
     max_total = int(max_total)
 
-    # Set the random seed
-    rng = np.random.default_rng(seed=seed)
+    # Reusable buffers
+    p_buffer = np.zeros(probs.size)  # probabilities
+    c_buffer = np.zeros(max_total, dtype=int)  # categories
+    r_buffer = np.zeros(max_total)  # random numbers
+    z_buffer = np.zeros(probs.size)  # incremental counts
 
-    # Sample the probabilities from a dirichlet
-    logger.info("Sampling priors from Dirichlet...")
-    p_hat = rng.dirichlet(alpha * probs, size=n_iter)
+    # Used for random sampling of categories
+    categories = np.arange(probs.size, dtype=int)
 
-    # Vectorized categorical sampling for all iterations and draw sizes at once
-    choice_matrix = _vectorized_categorical_sampling(
-        max_total,
-        p_hat,
-        n_iter,
-        rng,
-    )  # size : (max_total x n_iter)
-
-    # Initialize the incremental count matrix
-    z_matrix = np.zeros((n_iter, probs.size), dtype=int)
-
-    # Initialize the sample indices for quick lookups
-    sample_index = np.arange(n_iter, dtype=int)
-
-    # Precompute the $\alpha p_g$ value
-    ap = alpha * probs
-
-    # Initialize the log likelihood matrix
+    # Log-Likelihoods
     llik = np.zeros((max_total, n_iter))
-    for c_idx in tqdm(
-        np.arange(max_total),
-        total=max_total,
-        desc="Evaluating simulated log likelihood...",
-    ):
-        # Set the multinomial draw size
-        ni = c_idx + 1
 
-        # Determine the draw identity for each iteration
-        choice_at_n = choice_matrix[c_idx]
+    _fill_llik(
+        llik,
+        z_buffer,
+        p_buffer,
+        c_buffer,
+        categories,
+        r_buffer,
+        max_total,
+        alpha,
+        probs,
+        n_iter,
+        seed,
+    )
 
-        # Isolate the draw and its associated count for each iteration
-        zki = z_matrix[sample_index, choice_at_n]
-        zki += 1
+    # Calculate the cumulative sum inplace
+    np.cumsum(llik, axis=0, out=llik)
 
-        # Calculate the partial likelikelihood for the multinomial
-        llik[c_idx] = (
-            np.log(ni)
-            - np.log(ni + alpha - 1)
-            + np.log(zki + ap[choice_at_n] - 1)
-            - np.log(zki)
-        )
-
-    # Cumulative sum over each iteration for draw-specific likelihoods
-    return llik.cumsum(axis=0)
+    return llik
 
 
 def _evaluate_pvalue(
     obs: float,
     background: np.ndarray,
 ) -> float:
-    r = np.searchsorted(background, obs, side="right")
+    r = np.sum(background <= obs)
     return float((r + 1) / (background.size + 1))
 
 
@@ -339,6 +351,7 @@ def empty_drops(
         "sim_llik": sim_llik,
         "obs_llik": obs_llik,
         "obs_totals": candidate_totals,
+        "fdr": fdr,
         "n_iter": n_iter,
     }
 
