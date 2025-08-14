@@ -276,15 +276,24 @@ def empty_drops(
     logger.info("Determining cell UMI counts...")
     cell_umi_counts = np.array(matrix.sum(axis=1)).flatten().astype(int)
     if np.all(cell_umi_counts < min_umi_threshold):
-        logger.error(
-            f"All cells have less than {min_umi_threshold} UMIs. Returning empty anndata"
-        )
+        logger.error(f"All barcodes have less than {min_umi_threshold} UMIs.")
+        logger.warning("Returning empty anndata")
         return (
             adata[np.zeros(adata.shape[0], dtype=bool)],
             dict(),
         )
 
     # Identify ambient cells
+    if amb_ind_min < cell_umi_counts.size:
+        logger.error(
+            f"Not enough barcodes to identify ambient cells. Found only {cell_umi_counts.size} barcodes. Need at least {amb_ind_min + 1} barcodes"
+        )
+        logger.warning(
+            f"Returning simply filtered anndata (umis < {min_umi_threshold})"
+        )
+        mask = cell_umi_counts < min_umi_threshold
+        return adata[mask], dict()
+
     logger.info(f"Identifying {amb_ind_max - amb_ind_min} ambient cells...")
     argsorted_cell_umi_counts = np.argsort(cell_umi_counts)[::-1]  # descending order
     ambient_mask = argsorted_cell_umi_counts[amb_ind_min:amb_ind_max]
