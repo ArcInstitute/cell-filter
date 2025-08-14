@@ -275,6 +275,14 @@ def empty_drops(
     # Determine cell UMI counts
     logger.info("Determining cell UMI counts...")
     cell_umi_counts = np.array(matrix.sum(axis=1)).flatten().astype(int)
+    if np.all(cell_umi_counts < min_umi_threshold):
+        logger.error(
+            f"All cells have less than {min_umi_threshold} UMIs. Returning empty anndata"
+        )
+        return (
+            adata[np.zeros(adata.shape[0], dtype=bool)],
+            dict(),
+        )
 
     # Identify ambient cells
     logger.info(f"Identifying {amb_ind_max - amb_ind_min} ambient cells...")
