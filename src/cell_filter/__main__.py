@@ -34,7 +34,7 @@ def main(
     verbose: bool = False,
     logfile: str | None = None,
 ):
-    logger = logging.getLogger("cell-filter")
+    logger = logging.getLogger("cell-filter-cli")
     logging.basicConfig(
         format="%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
     )
@@ -42,7 +42,6 @@ def main(
         logger.setLevel(logging.INFO)
         if logfile:
             logger.addHandler(logging.FileHandler(logfile))
-        logger.info("Verbose mode enabled")
     else:
         logger.setLevel(logging.WARNING)
 
@@ -65,8 +64,11 @@ def main(
         logfile=logfile,
     )
 
-    logger.info(f"Writing filtered h5ad to {path_filt}")
-    filt.write_h5ad(path_filt)
+    if filt.shape[0] > 0:
+        logger.info(f"Writing filtered h5ad to: {path_filt}")
+        filt.write_h5ad(path_filt)
+    else:
+        logger.warning("Empty filtered h5ad - skipping write")
 
 
 def app():

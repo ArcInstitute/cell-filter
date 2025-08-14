@@ -284,7 +284,7 @@ def empty_drops(
         )
 
     # Identify ambient cells
-    if amb_ind_min < cell_umi_counts.size:
+    if cell_umi_counts.size < amb_ind_min:
         logger.error(
             f"Not enough barcodes to identify ambient cells. Found only {cell_umi_counts.size} barcodes. Need at least {amb_ind_min + 1} barcodes"
         )
