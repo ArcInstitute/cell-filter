@@ -1,8 +1,8 @@
 import logging
 
 import anndata as ad
-import numpy as np
 import numba as nb
+import numpy as np
 from scipy.optimize import OptimizeResult, minimize_scalar
 from scipy.sparse import csr_matrix
 from scipy.special import betaln
