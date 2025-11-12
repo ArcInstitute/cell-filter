@@ -5,29 +5,6 @@ from scipy.special import gammaln
 
 
 @nb.njit()
-def _fill_categories(
-    buffer: np.ndarray,
-    categories: np.ndarray,
-    rand_buffer: np.ndarray,
-    n: int,
-    p: np.ndarray,
-):
-    assert buffer.size == n, f"buffer size {buffer.size} != n {n}"
-    assert rand_buffer.size == n, f"rand_buffer size {rand_buffer.size} != n {n}"
-    assert categories.size == p.size, (
-        f"categories size {categories.size} != p size {p.size}"
-    )
-    rand_buffer[:] = np.random.random(size=rand_buffer.size)
-    buffer[:] = categories[
-        np.searchsorted(
-            np.cumsum(p),
-            rand_buffer,
-            side="right",
-        )
-    ]
-
-
-@nb.njit()
 def _fill_llik_multinomial(
     llik: np.ndarray,
     z_buffer: np.ndarray,
