@@ -1,11 +1,12 @@
 import logging
+from typing import Literal
 
 import anndata as ad
 import numba as nb
 import numpy as np
 from scipy.optimize import OptimizeResult, minimize_scalar
 from scipy.sparse import csr_matrix
-from scipy.special import betaln
+from scipy.special import betaln, gammaln
 from scipy.stats import false_discovery_control
 
 from ._sgt import simple_good_turing
@@ -27,9 +28,110 @@ AMB_INDEX_MAX = 90000
 # The number of simulations to perform
 N_SIMULATIONS = 10000
 # The threshold for the false discovery rate
-FDR_THRESHOLD = 0.1
+FDR_THRESHOLD = 0.01
 # The seed for the random number generator
 SEED = 42
+
+
+@nb.njit()
+def _fill_llik_multinomial(
+    llik: np.ndarray,
+    z_buffer: np.ndarray,
+    c_buffer: np.ndarray,
+    categories: np.ndarray,
+    r_buffer: np.ndarray,
+    max_total: int,
+    probs: np.ndarray,
+    n_iter: int,
+    seed: int,
+):
+    """Multinomial version - follows same pattern as _fill_llik but simpler."""
+    np.random.seed(seed)
+    logp = np.log(probs)
+    p_cumulative = np.cumsum(probs)
+
+    for s_idx in np.arange(n_iter, dtype=np.int64):
+        # Clear the z_buffer
+        z_buffer[:] = 0
+
+        # Draw samples directly from multinomial (no Dirichlet step)
+        r_buffer[:] = np.random.random(size=max_total)
+        c_buffer[:] = categories[np.searchsorted(p_cumulative, r_buffer, side="right")]
+
+        for n_idx in np.arange(max_total):
+            ni = n_idx + 1
+            choice_at_n = c_buffer[n_idx]
+
+            # Increment count (same as your DM version!)
+            z_buffer[choice_at_n] += 1
+            zki = z_buffer[choice_at_n]
+
+            # Multinomial incremental log-likelihood (simpler than DM)
+            llik[n_idx, s_idx] = np.log(ni) - np.log(zki) + logp[choice_at_n]
+
+
+def _evaluate_simulations_multinomial(
+    max_total: int, n_iter: int, probs: np.ndarray, seed: int
+) -> np.ndarray:
+    """Multinomial version - same structure as _evaluate_simulations."""
+    max_total = int(max_total)
+
+    # Reusable buffers (same as DM version)
+    c_buffer = np.zeros(max_total, dtype=int)
+    r_buffer = np.zeros(max_total)
+    z_buffer = np.zeros(probs.size)
+    categories = np.arange(probs.size, dtype=int)
+
+    # Log-Likelihoods
+    llik = np.zeros((max_total, n_iter))
+
+    _fill_llik_multinomial(
+        llik,
+        z_buffer,
+        c_buffer,
+        categories,
+        r_buffer,
+        max_total,
+        probs,
+        n_iter,
+        seed,
+    )
+
+    # Calculate cumulative sum (same as DM version)
+    np.cumsum(llik, axis=0, out=llik)
+
+    return llik
+
+
+def _eval_log_likelihood_multinomial(
+    matrix: csr_matrix,
+    total: np.ndarray,
+    probs: np.ndarray,
+) -> np.ndarray:
+    """Evaluate multinomial log-likelihood for observed data.
+
+    Args:
+        matrix: Observed counts (features x barcodes)
+        total: Total UMIs per barcode
+        probs: Feature probabilities
+
+    Returns:
+        Log-likelihoods for each barcode
+    """
+    logp = np.log(probs)
+    num_bcs = matrix.shape[0]  # type: ignore
+    loglk = np.zeros(num_bcs, dtype=float)
+
+    consts = gammaln(total + 1)
+
+    for i in range(num_bcs):
+        idx_start, idx_end = matrix.indptr[i], matrix.indptr[i + 1]
+        idxs = matrix.indices[idx_start:idx_end]
+        row = matrix.data[idx_start:idx_end]
+        short_logp = logp[idxs]
+        loglk[i] = consts[i] - gammaln(row + 1).sum() + (row * short_logp).sum()
+
+    return loglk
 
 
 def _eval_log_likelihood(
@@ -87,7 +189,7 @@ def _estimate_alpha(matrix: csr_matrix, probs: np.ndarray):
         bounds=(1e-6, 10000),
         method="bounded",
     )
-    if not result.success or not isinstance(result, OptimizeResult):
+    if not result.success or not isinstance(result, OptimizeResult):  # type: ignore
         raise ValueError("Optimization failed")
     return result.x
 
@@ -234,6 +336,7 @@ def empty_drops(
     fdr_threshold: float = FDR_THRESHOLD,
     seed: int = SEED,
     verbose: bool = False,
+    method: Literal["dirichlet", "multinomial"] = "multinomial",
     logfile: str | None = None,
 ) -> tuple[ad.AnnData, dict]:
     # Enforce typing on inputs
@@ -310,9 +413,14 @@ def empty_drops(
     probs = simple_good_turing(ambient_gene_sum)
 
     # Estimate alpha
-    logger.info("Maximum likelihood estimation of alpha...")
-    alpha = _estimate_alpha(amb_matrix, probs)
-    logger.info(f"Optimized alpha={alpha:.4f}...")
+    # Estimate alpha only if using dirichlet method
+    if method == "dirichlet":
+        logger.info("Maximum likelihood estimation of alpha...")
+        alpha = _estimate_alpha(amb_matrix, probs)
+        logger.info(f"Optimized alpha={alpha:.4f}...")
+    else:
+        logger.info("Using multinomial model (no alpha estimation)...")
+        alpha = None
 
     # Identify the retainment boundary
     max_ind = int(np.round(n_expected_cells * (1.0 - max_percentile)))
@@ -331,26 +439,36 @@ def empty_drops(
     logger.info(f"Rejection boundary: {reject_boundary} UMIs")
 
     # Score simulations (now with multiprocessing)
-    logger.info(f"Evaluating s={n_iter} simulations up to n={retain} unique totals")
-    sim_llik = _evaluate_simulations(
-        retain,
-        n_iter,
-        alpha,
-        probs,
-        seed,
-    )
-
-    # Score the likelihood of the candidate barcodes
     candidate_mask = (cell_umi_counts < retain) & (cell_umi_counts >= reject_boundary)
     candidate_matrix = matrix[candidate_mask]
     candidate_totals = cell_umi_counts[candidate_mask]
-    logger.info(f"Evaluating likelihood for {candidate_totals.size} candidate barcodes")
-    obs_llik = _eval_log_likelihood(
-        alpha,
-        candidate_matrix,
-        candidate_totals,
-        probs,
-    )
+    # Score simulations - use different method based on parameter
+    if method == "dirichlet":
+        assert alpha is not None, "alpha must be specified for Dirichlet method"
+        assert alpha > 0, "alpha must be greater than 0"
+        logger.info(
+            f"Evaluating s={n_iter} simulations up to n={retain} unique totals (Dirichlet-Multinomial)"
+        )
+        sim_llik = _evaluate_simulations(retain, n_iter, alpha, probs, seed)
+
+        logger.info(
+            f"Evaluating likelihood for {candidate_totals.size} candidate barcodes"
+        )
+        obs_llik = _eval_log_likelihood(
+            alpha, candidate_matrix, candidate_totals, probs
+        )
+    else:
+        logger.info(
+            f"Evaluating s={n_iter} simulations up to n={retain} unique totals (Multinomial)"
+        )
+        sim_llik = _evaluate_simulations_multinomial(retain, n_iter, probs, seed)
+
+        logger.info(
+            f"Evaluating likelihood for {candidate_totals.size} candidate barcodes"
+        )
+        obs_llik = _eval_log_likelihood_multinomial(
+            candidate_matrix, candidate_totals, probs
+        )
 
     # candidate false-discovery-rates
     logger.info(f"Evaluating pvalues for {candidate_totals.size} candidate barcodes")
@@ -381,6 +499,9 @@ def empty_drops(
         "fdr": fdr,
         "n_iter": n_iter,
     }
+    logger.info(
+        f"Final number of filtered cells: {passing_candidates.size + auto_accepted.size}"
+    )
 
     logger.info("Done!")
     return (adata[passing_cells], stats)
