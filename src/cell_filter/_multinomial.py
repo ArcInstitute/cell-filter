@@ -20,6 +20,7 @@ def _fill_llik_multinomial(
     np.random.seed(seed)
     logp = np.log(probs)
     p_cumulative = np.cumsum(probs)
+    p_cumulative[-1] = 1.0  # enforce 1.0 despite numerical instability
 
     for s_idx in np.arange(n_iter, dtype=np.int64):
         # Clear the z_buffer
