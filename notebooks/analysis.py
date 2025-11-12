@@ -1,13 +1,12 @@
 import marimo
 
-__generated_with = "0.14.17"
+__generated_with = "0.14.16"
 app = marimo.App()
 
 
 @app.cell
 def _():
     import anndata as ad
-    import numpy as np
 
     return (ad,)
 
@@ -27,6 +26,7 @@ def _(adata):
     filtered, _stats = empty_drops(
         adata,
         n_iter=10000,
+        verbose=True,
     )
     return
 
