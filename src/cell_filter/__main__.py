@@ -32,6 +32,7 @@ def main(
     fdr_threshold: float = FDR_THRESHOLD,
     seed: int = SEED,
     verbose: bool = False,
+    method: str = "multinomial",
     logfile: str | None = None,
 ):
     logger = logging.getLogger("cell-filter-cli")
@@ -61,6 +62,7 @@ def main(
         fdr_threshold=fdr_threshold,
         seed=seed,
         verbose=verbose,
+        method=method,  # type: ignore
         logfile=logfile,
     )
 
